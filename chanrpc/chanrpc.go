@@ -3,58 +3,51 @@ package chanrpc
 import (
 	"errors"
 	"fmt"
-	"github.com/name5566/leaf/conf"
-	"github.com/name5566/leaf/log"
+	"github.com/name5566/leaf/conf" // 配置
+	"github.com/name5566/leaf/log"  // 日志
 	"runtime"
 )
 
-// one server per goroutine (goroutine not safe)
-// one client per goroutine (goroutine not safe)
+// Server 表示一个 RPC 服务端
+// 每个 goroutine 对应一个 Server（非线程安全）
+// 每个 goroutine 对应一个 Client（非线程安全）
 type Server struct {
-	// id -> function
-	//
-	// function:
-	// func(args []interface{})
-	// func(args []interface{}) interface{}
-	// func(args []interface{}) []interface{}
-	functions map[interface{}]interface{}
-	ChanCall  chan *CallInfo
+	functions map[interface{}]interface{} // id -> 对应函数
+	ChanCall  chan *CallInfo              // 调用队列
 }
 
+// CallInfo 表示一次调用信息
 type CallInfo struct {
-	f       interface{}
-	args    []interface{}
-	chanRet chan *RetInfo
-	cb      interface{}
+	f       interface{}   // 函数
+	args    []interface{} // 参数
+	chanRet chan *RetInfo // 返回结果通道
+	cb      interface{}   // 回调
 }
 
+// RetInfo 表示返回信息
 type RetInfo struct {
-	// nil
-	// interface{}
-	// []interface{}
-	ret interface{}
-	err error
-	// callback:
-	// func(err error)
-	// func(ret interface{}, err error)
-	// func(ret []interface{}, err error)
-	cb interface{}
+	ret interface{} // 返回值，可以是 nil / interface{} / []interface{}
+	err error       // 错误
+	cb  interface{} // 回调函数
 }
 
+// Client 表示 RPC 客户端
 type Client struct {
-	s               *Server
-	chanSyncRet     chan *RetInfo
-	ChanAsynRet     chan *RetInfo
-	pendingAsynCall int
+	s               *Server       // 绑定的服务端
+	chanSyncRet     chan *RetInfo // 同步返回通道
+	ChanAsynRet     chan *RetInfo // 异步返回通道
+	pendingAsynCall int           // 待处理异步调用数量
 }
 
+// NewServer 创建新的 Server
 func NewServer(l int) *Server {
 	s := new(Server)
 	s.functions = make(map[interface{}]interface{})
-	s.ChanCall = make(chan *CallInfo, l)
+	s.ChanCall = make(chan *CallInfo, l) // 带缓冲通道
 	return s
 }
 
+// assert 将 interface{} 转为 []interface{}
 func assert(i interface{}) []interface{} {
 	if i == nil {
 		return nil
@@ -63,7 +56,7 @@ func assert(i interface{}) []interface{} {
 	}
 }
 
-// you must call the function before calling Open and Go
+// Register 注册函数到 Server
 func (s *Server) Register(id interface{}, f interface{}) {
 	switch f.(type) {
 	case func([]interface{}):
@@ -80,6 +73,7 @@ func (s *Server) Register(id interface{}, f interface{}) {
 	s.functions[id] = f
 }
 
+// ret 向 CallInfo 的 chanRet 发送返回信息
 func (s *Server) ret(ci *CallInfo, ri *RetInfo) (err error) {
 	if ci.chanRet == nil {
 		return
@@ -96,6 +90,7 @@ func (s *Server) ret(ci *CallInfo, ri *RetInfo) (err error) {
 	return
 }
 
+// exec 执行 CallInfo 中的函数
 func (s *Server) exec(ci *CallInfo) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -111,7 +106,7 @@ func (s *Server) exec(ci *CallInfo) (err error) {
 		}
 	}()
 
-	// execute
+	// 根据函数类型执行
 	switch ci.f.(type) {
 	case func([]interface{}):
 		ci.f.(func([]interface{}))(ci.args)
@@ -127,6 +122,7 @@ func (s *Server) exec(ci *CallInfo) (err error) {
 	panic("bug")
 }
 
+// Exec 执行 CallInfo 并打印错误
 func (s *Server) Exec(ci *CallInfo) {
 	err := s.exec(ci)
 	if err != nil {
@@ -134,7 +130,7 @@ func (s *Server) Exec(ci *CallInfo) {
 	}
 }
 
-// goroutine safe
+// Go 将函数调用发送到服务器通道（goroutine safe）
 func (s *Server) Go(id interface{}, args ...interface{}) {
 	f := s.functions[id]
 	if f == nil {
@@ -151,21 +147,22 @@ func (s *Server) Go(id interface{}, args ...interface{}) {
 	}
 }
 
-// goroutine safe
+// Call0 同步调用无返回值函数
 func (s *Server) Call0(id interface{}, args ...interface{}) error {
 	return s.Open(0).Call0(id, args...)
 }
 
-// goroutine safe
+// Call1 同步调用单返回值函数
 func (s *Server) Call1(id interface{}, args ...interface{}) (interface{}, error) {
 	return s.Open(0).Call1(id, args...)
 }
 
-// goroutine safe
+// CallN 同步调用多返回值函数
 func (s *Server) CallN(id interface{}, args ...interface{}) ([]interface{}, error) {
 	return s.Open(0).CallN(id, args...)
 }
 
+// Close 关闭 Server
 func (s *Server) Close() {
 	close(s.ChanCall)
 
@@ -176,13 +173,14 @@ func (s *Server) Close() {
 	}
 }
 
-// goroutine safe
+// Open 创建新的 Client 并绑定 Server
 func (s *Server) Open(l int) *Client {
 	c := NewClient(l)
 	c.Attach(s)
 	return c
 }
 
+// NewClient 创建新的 Client
 func NewClient(l int) *Client {
 	c := new(Client)
 	c.chanSyncRet = make(chan *RetInfo, 1)
@@ -190,10 +188,12 @@ func NewClient(l int) *Client {
 	return c
 }
 
+// Attach 绑定 Client 到 Server
 func (c *Client) Attach(s *Server) {
 	c.s = s
 }
 
+// call 发送调用到 Server
 func (c *Client) call(ci *CallInfo, block bool) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -213,6 +213,7 @@ func (c *Client) call(ci *CallInfo, block bool) (err error) {
 	return
 }
 
+// f 获取函数并检查类型
 func (c *Client) f(id interface{}, n int) (f interface{}, err error) {
 	if c.s == nil {
 		err = errors.New("server not attached")
@@ -243,6 +244,7 @@ func (c *Client) f(id interface{}, n int) (f interface{}, err error) {
 	return
 }
 
+// Call0 同步调用无返回值
 func (c *Client) Call0(id interface{}, args ...interface{}) error {
 	f, err := c.f(id, 0)
 	if err != nil {
@@ -262,6 +264,7 @@ func (c *Client) Call0(id interface{}, args ...interface{}) error {
 	return ri.err
 }
 
+// Call1 同步调用单返回值
 func (c *Client) Call1(id interface{}, args ...interface{}) (interface{}, error) {
 	f, err := c.f(id, 1)
 	if err != nil {
@@ -281,6 +284,7 @@ func (c *Client) Call1(id interface{}, args ...interface{}) (interface{}, error)
 	return ri.ret, ri.err
 }
 
+// CallN 同步调用多返回值
 func (c *Client) CallN(id interface{}, args ...interface{}) ([]interface{}, error) {
 	f, err := c.f(id, 2)
 	if err != nil {
@@ -300,6 +304,7 @@ func (c *Client) CallN(id interface{}, args ...interface{}) ([]interface{}, erro
 	return assert(ri.ret), ri.err
 }
 
+// asynCall 异步调用函数
 func (c *Client) asynCall(id interface{}, args []interface{}, cb interface{}, n int) {
 	f, err := c.f(id, n)
 	if err != nil {
@@ -319,13 +324,14 @@ func (c *Client) asynCall(id interface{}, args []interface{}, cb interface{}, n 
 	}
 }
 
+// AsynCall 异步调用函数
 func (c *Client) AsynCall(id interface{}, _args ...interface{}) {
 	if len(_args) < 1 {
 		panic("callback function not found")
 	}
 
-	args := _args[:len(_args)-1]
-	cb := _args[len(_args)-1]
+	args := _args[:len(_args)-1] // 参数
+	cb := _args[len(_args)-1]    // 回调
 
 	var n int
 	switch cb.(type) {
@@ -339,7 +345,7 @@ func (c *Client) AsynCall(id interface{}, _args ...interface{}) {
 		panic("definition of callback function is invalid")
 	}
 
-	// too many calls
+	// 异步调用过多
 	if c.pendingAsynCall >= cap(c.ChanAsynRet) {
 		execCb(&RetInfo{err: errors.New("too many calls"), cb: cb})
 		return
@@ -349,6 +355,7 @@ func (c *Client) AsynCall(id interface{}, _args ...interface{}) {
 	c.pendingAsynCall++
 }
 
+// execCb 执行回调
 func execCb(ri *RetInfo) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -362,7 +369,6 @@ func execCb(ri *RetInfo) {
 		}
 	}()
 
-	// execute
 	switch ri.cb.(type) {
 	case func(error):
 		ri.cb.(func(error))(ri.err)
@@ -376,17 +382,20 @@ func execCb(ri *RetInfo) {
 	return
 }
 
+// Cb 处理异步返回
 func (c *Client) Cb(ri *RetInfo) {
 	c.pendingAsynCall--
 	execCb(ri)
 }
 
+// Close 关闭 Client，等待所有异步调用完成
 func (c *Client) Close() {
 	for c.pendingAsynCall > 0 {
 		c.Cb(<-c.ChanAsynRet)
 	}
 }
 
+// Idle 判断 Client 是否空闲
 func (c *Client) Idle() bool {
 	return c.pendingAsynCall == 0
 }

@@ -2,21 +2,22 @@ package mongodb
 
 import (
 	"container/heap"
+	"sync"
+	"time"
+
 	"github.com/name5566/leaf/log"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
-	"sync"
-	"time"
 )
 
-// session
+// Session 封装 mgo.Session 并增加引用计数和堆索引
 type Session struct {
 	*mgo.Session
-	ref   int
-	index int
+	ref   int // 当前引用次数
+	index int // 在堆中的索引
 }
 
-// session heap
+// SessionHeap 实现堆接口，用于管理 Session 按引用次数排序
 type SessionHeap []*Session
 
 func (h SessionHeap) Len() int {
@@ -24,7 +25,7 @@ func (h SessionHeap) Len() int {
 }
 
 func (h SessionHeap) Less(i, j int) bool {
-	return h[i].ref < h[j].ref
+	return h[i].ref < h[j].ref // 引用次数少的优先
 }
 
 func (h SessionHeap) Swap(i, j int) {
@@ -46,18 +47,19 @@ func (h *SessionHeap) Pop() interface{} {
 	return s
 }
 
+// DialContext 管理 Session 堆，保证 goroutine 安全
 type DialContext struct {
 	sync.Mutex
 	sessions SessionHeap
 }
 
-// goroutine safe
+// Dial 创建 DialContext，默认超时
 func Dial(url string, sessionNum int) (*DialContext, error) {
 	c, err := DialWithTimeout(url, sessionNum, 10*time.Second, 5*time.Minute)
 	return c, err
 }
 
-// goroutine safe
+// DialWithTimeout 创建 DialContext，并设置连接超时和同步超时
 func DialWithTimeout(url string, sessionNum int, dialTimeout time.Duration, timeout time.Duration) (*DialContext, error) {
 	if sessionNum <= 0 {
 		sessionNum = 100
@@ -73,7 +75,7 @@ func DialWithTimeout(url string, sessionNum int, dialTimeout time.Duration, time
 
 	c := new(DialContext)
 
-	// sessions
+	// 初始化 session 堆
 	c.sessions = make(SessionHeap, sessionNum)
 	c.sessions[0] = &Session{s, 0, 0}
 	for i := 1; i < sessionNum; i++ {
@@ -84,7 +86,7 @@ func DialWithTimeout(url string, sessionNum int, dialTimeout time.Duration, time
 	return c, nil
 }
 
-// goroutine safe
+// Close 关闭所有 session，检查引用是否为 0
 func (c *DialContext) Close() {
 	c.Lock()
 	for _, s := range c.sessions {
@@ -96,21 +98,21 @@ func (c *DialContext) Close() {
 	c.Unlock()
 }
 
-// goroutine safe
+// Ref 获取引用次数最少的 session 并增加引用计数
 func (c *DialContext) Ref() *Session {
 	c.Lock()
 	s := c.sessions[0]
 	if s.ref == 0 {
-		s.Refresh()
+		s.Refresh() // 刷新 session
 	}
 	s.ref++
-	heap.Fix(&c.sessions, 0)
+	heap.Fix(&c.sessions, 0) // 更新堆
 	c.Unlock()
 
 	return s
 }
 
-// goroutine safe
+// UnRef 释放 session 的引用并调整堆顺序
 func (c *DialContext) UnRef(s *Session) {
 	c.Lock()
 	s.ref--
@@ -118,7 +120,7 @@ func (c *DialContext) UnRef(s *Session) {
 	c.Unlock()
 }
 
-// goroutine safe
+// EnsureCounter 确保某集合的计数器存在，如果不存在则创建
 func (c *DialContext) EnsureCounter(db string, collection string, id string) error {
 	s := c.Ref()
 	defer c.UnRef(s)
@@ -134,7 +136,7 @@ func (c *DialContext) EnsureCounter(db string, collection string, id string) err
 	}
 }
 
-// goroutine safe
+// NextSeq 获取计数器下一个值
 func (c *DialContext) NextSeq(db string, collection string, id string) (int, error) {
 	s := c.Ref()
 	defer c.UnRef(s)
@@ -143,14 +145,14 @@ func (c *DialContext) NextSeq(db string, collection string, id string) (int, err
 		Seq int
 	}
 	_, err := s.DB(db).C(collection).FindId(id).Apply(mgo.Change{
-		Update:    bson.M{"$inc": bson.M{"seq": 1}},
+		Update:    bson.M{"$inc": bson.M{"seq": 1}}, // 原子递增
 		ReturnNew: true,
 	}, &res)
 
 	return res.Seq, err
 }
 
-// goroutine safe
+// EnsureIndex 确保集合索引存在
 func (c *DialContext) EnsureIndex(db string, collection string, key []string) error {
 	s := c.Ref()
 	defer c.UnRef(s)
@@ -162,7 +164,7 @@ func (c *DialContext) EnsureIndex(db string, collection string, key []string) er
 	})
 }
 
-// goroutine safe
+// EnsureUniqueIndex 确保唯一索引存在
 func (c *DialContext) EnsureUniqueIndex(db string, collection string, key []string) error {
 	s := c.Ref()
 	defer c.UnRef(s)
